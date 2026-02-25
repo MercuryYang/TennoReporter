@@ -17,7 +17,7 @@ from pathlib import Path
 # ══════════════════════════════════════════════
 #  配置
 # ══════════════════════════════════════════════
-WEBHOOK_URL  = "https://discord.com/api/webhooks/1474036995905814632/vaavN2oPnjY08vdyw8KGkCCfiBu-nCxUrHZzQeKHTlSp7a4dk2m8sDuNtjRiuzjhPlP7"
+WEBHOOK_URL  = "https://discord.com/api/webhooks/yourdiscordbotabcdefg"
 API_URL      = "https://api.warframe.com/cdn/worldState.php"
 WEATHER_API  = "https://api.warframestat.us/pc"   # 天气用已解析 API，字段名有保证
 CHECK_EVERY  = 10
