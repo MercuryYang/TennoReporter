@@ -18,7 +18,7 @@ from pathlib import Path
 #  配置
 # ══════════════════════════════════════════════
 WEBHOOK_URL  = "https://discord.com/api/webhooks/yourdiscordbotabcdefg"
-API_URL = "https://api.warframestat.us/pc/worldstate"
+API_URL =  "https://api.warframestat.us/pc/"
 WEATHER_API  = "https://api.warframestat.us/pc"   # 天气用已解析 API，字段名有保证
 CHECK_EVERY  = 10
 STATE_FILE   = "state.json"
