@@ -440,7 +440,8 @@ class TennoReporter(tk.Tk):
     # ────────────────────────────────────────────
     #  数据处理
     # ────────────────────────────────────────────
-    def _process_data(self, data):
+    @staticmethod
+    def _process_data(data):
         cur = now_ms()
 
         # ── 虚空商人 ──
@@ -512,7 +513,8 @@ class TennoReporter(tk.Tk):
 
         return traders, invasions, fissures
 
-    def _fetch_weather(self):
+    @staticmethod
+    def _fetch_weather():
         """从 warframestat.us 获取天气（字段名有文档保证）"""
         weather = []
         try:
@@ -569,7 +571,8 @@ class TennoReporter(tk.Tk):
 
         return weather
 
-    def _do_discord_notifications(self, traders, invasions, fissures):
+    @staticmethod
+    def _do_discord_notifications(traders, invasions, fissures):
         cur = now_ms()
         for t in traders:
             oid = t["_oid"]
@@ -743,7 +746,7 @@ class TennoReporter(tk.Tk):
             "ok"
         )
         self._set_status("● 运行中", C["green"])
-        self._do_discord_notifications(traders, invasions, fissures)
+        self.__class__._do_discord_notifications(traders, invasions, fissures)
         purge_old(self.state)
         save_state(self.state)
 
@@ -876,11 +879,11 @@ class HeadlessReporter:
             return
 
         # 调用 TennoReporter 内的数据处理逻辑（复用）
-        traders, invasions, fissures = TennoReporter._process_data(self=TennoReporter, data=data)
+        traders, invasions, fissures = TennoReporter._process_data(data)
 
         # 天气（只取地球）
         try:
-            w_all = TennoReporter._fetch_weather(self=TennoReporter)
+            w_all = TennoReporter._fetch_weather()
             weather_list = [w for w in w_all if w["planet"] == "地球"]
         except:
             weather_list = []
@@ -888,12 +891,7 @@ class HeadlessReporter:
         self.log(f"刷新成功: 商人 {len(traders)}, 入侵 {len(invasions)}, 裂缝 {len(fissures)}, 天气 {len(weather_list)}")
 
         # 执行推送逻辑（使用 GUI 类中的运行函数）
-        TennoReporter._do_discord_notifications(
-            self=TennoReporter,
-            traders=traders,
-            invasions=invasions,
-            fissures=fissures
-        )
+        TennoReporter._do_discord_notifications(traders, invasions, fissures)
 
         purge_old(self.state)
         save_state(self.state)
