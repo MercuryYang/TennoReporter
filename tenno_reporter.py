@@ -853,10 +853,65 @@ class TennoReporter(tk.Tk):
             self.lbl_next.configure(text="")
         self.after(1000, self._tick)
 
+class HeadlessReporter:
+    """
+    云端无 GUI 版本：不创建窗口，不需要 tkinter。
+    只执行世界状态轮询 + Discord 自动推送。
+    """
+    def __init__(self):
+        self.state = load_state()
+        self.last_data = None
+
+    def log(self, msg):
+        print("[CLOUD]", msg)
+
+    def run_once(self):
+        # 拉取 API
+        try:
+            r = requests.get(API_URL, timeout=15)
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            self.log(f"API 请求失败: {e}")
+            return
+
+        # 调用 TennoReporter 内的数据处理逻辑（复用）
+        traders, invasions, fissures = TennoReporter._process_data(self=TennoReporter, data=data)
+
+        # 天气（只取地球）
+        try:
+            w_all = TennoReporter._fetch_weather(self=TennoReporter)
+            weather_list = [w for w in w_all if w["planet"] == "地球"]
+        except:
+            weather_list = []
+
+        self.log(f"刷新成功: 商人 {len(traders)}, 入侵 {len(invasions)}, 裂缝 {len(fissures)}, 天气 {len(weather_list)}")
+
+        # 执行推送逻辑（使用 GUI 类中的运行函数）
+        TennoReporter._do_discord_notifications(
+            self=TennoReporter,
+            traders=traders,
+            invasions=invasions,
+            fissures=fissures
+        )
+
+        purge_old(self.state)
+        save_state(self.state)
+
+    def loop_forever(self):
+        self.log("云端模式已启动（无 GUI）")
+        while True:
+            self.run_once()
+            time.sleep(CHECK_EVERY)
 
 # ══════════════════════════════════════════════
 #  入口
 # ══════════════════════════════════════════════
 if __name__ == "__main__":
-    app = TennoReporter()
-    app.mainloop()
+    # 当 cloud_runner 调用时，不启动 GUI
+    if "--headless" in sys.argv:
+        bot = HeadlessReporter()
+        bot.loop_forever()
+    else:
+        app = TennoReporter()
+        app.mainloop()
