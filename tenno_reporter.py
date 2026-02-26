@@ -22,9 +22,7 @@ WEBHOOK_URL = os.environ.get(
     "DISCORD_WEBHOOK_URL",
     "https://discord.com/api/webhooks/yourdiscordbotabcdefg"
 )
-API_URL      = os.environ.get("WF_API_URL",     "https://api.warframestat.us/pc/")
-WEATHER_API  = os.environ.get("WF_WEATHER_URL", "https://api.warframestat.us/pc")
-CHECK_EVERY  = int(os.environ.get("CHECK_INTERVAL", "60"))   # Railway 建议 60s+ 避免限流
+CHECK_EVERY  = int(os.environ.get("CHECK_INTERVAL", "60"))
 STATE_FILE   = os.environ.get("STATE_FILE", "state.json")
 
 RARE_KEYWORDS = ["OrokinCatalyst", "OrokinReactor", "Forma",
@@ -32,15 +30,6 @@ RARE_KEYWORDS = ["OrokinCatalyst", "OrokinReactor", "Forma",
 TIER_NAME     = {"VoidT1":"Lith","VoidT2":"Meso","VoidT3":"Neo",
                  "VoidT4":"Axi","VoidT5":"Requiem","VoidT6":"Omnia"}
 FACTION_NAME  = {"FC_CORPUS":"星团","FC_GRINEER":"基尼尔","FC_INFESTATION":"感染体"}
-
-STEEL_NODES = {"SolNode409", "SolNode405", "SolNode30", "SolNode122", "SolNode177"}
-STEEL_LABEL = {
-    "SolNode409": "Mot (虚空)",
-    "SolNode405": "Ani (虚空)",
-    "SolNode30":  "Olympus (火星)",
-    "SolNode122": "Stephano (天王星)",
-    "SolNode177": "Kappa (冥神星)",
-}
 
 # ══════════════════════════════════════════════
 #  工具函数
@@ -57,18 +46,6 @@ def remaining(ms):
         return "已过期"
     h, m = int(diff // 3600), int((diff % 3600) // 60)
     return f"{h}h {m:02d}m" if h else f"{m}m"
-
-def expiry_ms(obj):
-    try:
-        return int(obj["Expiry"]["$date"]["$numberLong"])
-    except Exception:
-        return 0
-
-def activation_ms(obj):
-    try:
-        return int(obj["Activation"]["$date"]["$numberLong"])
-    except Exception:
-        return 0
 
 def load_state() -> dict:
     if Path(STATE_FILE).exists():
@@ -87,25 +64,6 @@ def purge_old(state: dict):
     for k in stale:
         del state[k]
 
-def _get_items(reward):
-    if isinstance(reward, dict):
-        return reward.get("countedItems", [])
-    return []
-
-def fmt_reward(reward) -> str:
-    items = _get_items(reward)
-    if not items:
-        return "无"
-    return "  ".join(
-        f"{it['ItemType'].split('/')[-1]} x{it.get('ItemCount', 1)}"
-        for it in items
-    )
-
-def is_rare(reward) -> bool:
-    return any(
-        any(kw in it.get("ItemType", "") for kw in RARE_KEYWORDS)
-        for it in _get_items(reward)
-    )
 
 # ══════════════════════════════════════════════
 #  Discord 推送
@@ -142,84 +100,216 @@ def post_discord(embed: dict, log_fn=None):
     time.sleep(0.6)   # 避免触发 Discord rate limit (50 req/s global)
 
 # ══════════════════════════════════════════════
-#  数据处理（纯函数，GUI/Cloud 共用）
+#  API 子端点请求（warframestat.us 解析版）
 # ══════════════════════════════════════════════
-def process_data(data: dict):
-    """返回 (traders, invasions, fissures)"""
-    cur = now_ms()
+BASE = "https://api.warframestat.us/pc"
 
-    # ── 虚空商人 ──
+def _get(path: str, log_fn=None) -> any:
+    """GET BASE/path，失败返回 None"""
+    url = f"{BASE}/{path}"
+    try:
+        r = requests.get(url, timeout=15,
+                         headers={"Accept-Language": "zh-hans"})
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        if log_fn:
+            log_fn(f"请求失败 {path}: {e}", "err")
+        return None
+
+
+def _parse_iso_ms(s: str) -> int:
+    """ISO 时间字符串 → 毫秒时间戳"""
+    if not s:
+        return 0
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return int(dt.timestamp() * 1000)
+    except Exception:
+        return 0
+
+
+# ── 稀有入侵判断（解析版字段名）──
+RARE_REWARD_TYPES = ["OrokinCatalyst", "OrokinReactor", "Forma",
+                     "AuraForma", "Riven", "AladCoordinate", "SentinelWeaponBP"]
+
+def _reward_is_rare(reward_obj) -> bool:
+    """
+    warframestat.us invasion reward 结构:
+    {"asString": "...", "items": [...], "credits": 0, "thumbnail": "...", "color": 0}
+    items 列表中的元素: {"uniqueName": "...", "count": 1, "type": "..."}
+    """
+    if not isinstance(reward_obj, dict):
+        return False
+    items = reward_obj.get("items", [])
+    if not items:
+        # 也有部分 API 直接用 "countedItems"
+        items = reward_obj.get("countedItems", [])
+    for it in items:
+        name = it.get("uniqueName", "") or it.get("type", "")
+        if any(kw in name for kw in RARE_REWARD_TYPES):
+            return True
+    return False
+
+def _fmt_reward_parsed(reward_obj) -> str:
+    if not isinstance(reward_obj, dict):
+        return "无"
+    # 优先用 asString（已格式化）
+    s = reward_obj.get("asString", "").strip()
+    if s:
+        return s
+    items = reward_obj.get("items", reward_obj.get("countedItems", []))
+    if not items:
+        return "无"
+    return "  ".join(
+        f"{it.get('type', it.get('uniqueName','?')).split('/')[-1]} x{it.get('count', 1)}"
+        for it in items
+    )
+
+
+# ══════════════════════════════════════════════
+#  数据处理（各子端点，GUI/Cloud 共用）
+# ══════════════════════════════════════════════
+def fetch_traders(log_fn=None) -> list:
+    """
+    GET /pc/voidTraders → list
+    字段: id, character, location, active, activation(ISO), expiry(ISO),
+          startString, endString, inventory(list)
+    """
+    data = _get("voidTraders", log_fn)
+    if not isinstance(data, list):
+        # 部分版本返回单对象
+        data = [data] if isinstance(data, dict) else []
+
     traders = []
-    for t in data.get("VoidTraders", []):
-        exp = expiry_ms(t)
-        act = activation_ms(t)
-        if exp and cur > exp:
+    cur = now_ms()
+    for t in data:
+        if not t:
+            continue
+        exp_ms = _parse_iso_ms(t.get("expiry", ""))
+        act_ms = _parse_iso_ms(t.get("activation", ""))
+        if exp_ms and cur > exp_ms:
             continue
         traders.append({
-            "_active":        cur >= act,
-            "name":           t.get("Character", "Baro'Ki Teel"),
-            "node":           t.get("Node", "未知"),
-            "remain":         remaining(exp),
-            "arrive_remain":  remaining(act),
-            "arrive_str":     to_dt(act),
-            "expiry_str":     to_dt(exp),
-            "_oid":           t.get("_id", {}).get("$oid", ""),
-            "_act_ms":        act,
-            "_exp_ms":        exp,
+            "_active":       t.get("active", False),
+            "name":          t.get("character", "Baro Ki'Teer"),
+            "node":          t.get("location", "未知"),
+            "remain":        t.get("endString") or remaining(exp_ms),
+            "arrive_remain": t.get("startString") or remaining(act_ms),
+            "arrive_str":    to_dt(act_ms) if act_ms else "—",
+            "expiry_str":    to_dt(exp_ms) if exp_ms else "—",
+            "_oid":          t.get("id", ""),
+            "_act_ms":       act_ms,
+            "_exp_ms":       exp_ms,
         })
+    return traders
 
-    # ── 稀有入侵 ──
+
+def fetch_invasions(log_fn=None) -> list:
+    """
+    GET /pc/invasions → list
+    字段: id, node, desc, attackingFaction, defendingFaction,
+          attacker{reward{...}}, defender{reward{...}},
+          completed(bool), count(int), goal(int), eta
+    """
+    data = _get("invasions", log_fn)
+    if not isinstance(data, list):
+        return []
+
     invasions = []
-    for inv in data.get("Invasions", []):
-        if inv.get("Completed", False):
+    for inv in data:
+        if inv.get("completed", False):
             continue
-        atk_r = inv.get("AttackerReward", {})
-        def_r = inv.get("DefenderReward", {})
-        if not is_rare(atk_r) and not is_rare(def_r):
+
+        atk_reward = inv.get("attacker", {}).get("reward", {})
+        def_reward = inv.get("defender", {}).get("reward", {})
+
+        if not _reward_is_rare(atk_reward) and not _reward_is_rare(def_reward):
             continue
-        count = abs(inv.get("Count", 0))
-        goal  = max(inv.get("Goal", 1), 1)
+
+        count    = abs(inv.get("count", 0))
+        goal     = max(inv.get("goal", 1), 1)
+        atk_fac  = inv.get("attackingFaction", "")
+        def_fac  = inv.get("defendingFaction", "")
+
         invasions.append({
-            "node":     inv.get("Node", "未知"),
-            "atk":      FACTION_NAME.get(inv.get("Faction", ""),         inv.get("Faction", "")),
-            "def_":     FACTION_NAME.get(inv.get("DefenderFaction", ""), inv.get("DefenderFaction", "")),
-            "atk_r":    fmt_reward(atk_r),
-            "def_r":    fmt_reward(def_r),
+            "node":     inv.get("node", "未知"),
+            "atk":      FACTION_NAME.get(atk_fac, atk_fac),
+            "def_":     FACTION_NAME.get(def_fac, def_fac),
+            "atk_r":    _fmt_reward_parsed(atk_reward),
+            "def_r":    _fmt_reward_parsed(def_reward),
             "progress": count / goal * 100,
-            "_oid":     inv.get("_id", {}).get("$oid", ""),
+            "_oid":     inv.get("id", ""),
         })
+    return invasions
 
-    # ── 钢铁裂缝 ──
+
+def fetch_fissures(log_fn=None) -> list:
+    """
+    GET /pc/fissures → list
+    字段: id, node, missionType, tier, tierNum, expiry(ISO),
+          isHard(bool), isStorm(bool), eta, active(bool)
+    """
+    data = _get("fissures", log_fn)
+    if not isinstance(data, list):
+        return []
+
     fissures = []
-    for m in data.get("ActiveMissions", []):
-        if not m.get("Hard", False):
+    cur = now_ms()
+    for m in data:
+        # 只要钢铁路径（isHard=true）
+        if not m.get("isHard", False):
             continue
-        node  = m.get("Node", "")
-        is_h2 = "H-2" in node
-        if node not in STEEL_NODES and not is_h2:
+        if not m.get("active", True):
             continue
-        exp = expiry_ms(m)
-        if exp and cur > exp:
-            continue
-        fissures.append({
-            "node_label": STEEL_LABEL.get(node, "H-2 星云" if is_h2 else node),
-            "tier":       TIER_NAME.get(m.get("Modifier", ""), m.get("Modifier", "")),
-            "mtype":      m.get("MissionType", "").replace("MT_", ""),
-            "remain":     remaining(exp),
-            "expiry":     to_dt(exp),
-            "_oid":       m.get("_id", {}).get("$oid", ""),
-        })
 
-    return traders, invasions, fissures
+        exp_ms = _parse_iso_ms(m.get("expiry", ""))
+        if exp_ms and cur > exp_ms:
+            continue
+
+        node = m.get("node", "")
+        fissures.append({
+            "node_label": node,
+            "tier":       m.get("tier", m.get("tierNum", "")),
+            "mtype":      m.get("missionType", ""),
+            "remain":     m.get("eta") or remaining(exp_ms),
+            "expiry":     to_dt(exp_ms) if exp_ms else "—",
+            "_oid":       m.get("id", ""),
+        })
+    return fissures
+
+
+def process_data(log_fn=None):
+    """并行拉取三个子端点，返回 (traders, invasions, fissures)"""
+    results = {}
+
+    def _fetch(key, fn):
+        results[key] = fn(log_fn)
+
+    threads = [
+        threading.Thread(target=_fetch, args=("traders",  lambda l: fetch_traders(l))),
+        threading.Thread(target=_fetch, args=("invasions", lambda l: fetch_invasions(l))),
+        threading.Thread(target=_fetch, args=("fissures",  lambda l: fetch_fissures(l))),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=20)
+
+    return (
+        results.get("traders", []),
+        results.get("invasions", []),
+        results.get("fissures", []),
+    )
 
 
 def fetch_weather() -> list:
-    """从 warframestat.us 获取天气（独立函数，不依赖任何类）"""
+    """从 warframestat.us 各子端点获取天气（独立函数，不依赖任何类）"""
     weather = []
     try:
-        r = requests.get(WEATHER_API, timeout=15)
-        r.raise_for_status()
-        ws = r.json()
+        ws = _get("", None)   # GET /pc/ 返回完整 worldstate
+        if not isinstance(ws, dict):
+            return weather
     except Exception as e:
         print(f"[WARN] 天气数据获取失败: {e}")
         return weather
@@ -410,15 +500,7 @@ class HeadlessReporter:
 
     def run_once(self):
         self.log("轮询 API...")
-        try:
-            r = requests.get(API_URL, timeout=15)
-            r.raise_for_status()
-            data = r.json()
-        except Exception as e:
-            self.log(f"API 请求失败: {e}", "err")
-            return
-
-        traders, invasions, fissures = process_data(data)
+        traders, invasions, fissures = process_data(self.log)
         self.log(
             f"刷新成功 — 商人:{len(traders)}  稀有入侵:{len(invasions)}  "
             f"钢铁裂缝:{len(fissures)}",
@@ -475,7 +557,9 @@ def run_gui():
             self.running    = False
             self.worker     = None
             self.next_check = 0
-            self.last_data  = None
+            self.last_traders  = []
+            self.last_invasions = []
+            self.last_fissures  = []
             self._build_ui()
             self._start_clock()
 
@@ -697,16 +781,10 @@ def run_gui():
         def _fetch_and_update(self):
             self._set_status("● 正在请求...", C["accent"])
             self._log("轮询 API...", "info")
-            try:
-                r = requests.get(API_URL, timeout=15)
-                r.raise_for_status()
-                data = r.json()
-            except Exception as e:
-                self._log(f"API 请求失败: {e}", "err")
-                self._set_status("● 请求失败", C["log_err"])
-                return
-            traders, invasions, fissures = process_data(data)
-            self.last_data = data
+            traders, invasions, fissures = process_data(self._log)
+            self.last_traders  = traders
+            self.last_invasions = invasions
+            self.last_fissures  = fissures
             weather = fetch_weather()
             self.after(0, lambda t=traders:   self.render_trader(t))
             self.after(0, lambda i=invasions: self.render_invasions(i))
@@ -749,14 +827,16 @@ def run_gui():
                 self.next_check = 0
 
         def _force_push(self):
-            if not self.last_data:
+            if not hasattr(self, 'last_traders'):
                 self._log("尚无数据，请先刷新", "warn")
                 return
             self.btn_push.configure(state="disabled", text="推送中...")
             self._log("── 强制推送开始 ──", "accent")
 
             def _do():
-                traders, invasions, fissures = process_data(self.last_data)
+                traders  = self.last_traders
+                invasions = self.last_invasions
+                fissures  = self.last_fissures
                 sent = 0
                 for t in traders:
                     embed = (
