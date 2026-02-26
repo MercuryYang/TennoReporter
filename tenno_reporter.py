@@ -246,30 +246,52 @@ def fetch_invasions(log_fn=None) -> list:
 
 def fetch_fissures(log_fn=None) -> list:
     """
-    GET /pc/fissures → list
-    字段: id, node, missionType, tier, tierNum, expiry(ISO),
-          isHard(bool), isStorm(bool), eta, active(bool)
+    GET /pc/fissures → list，只返回关注节点的钢铁裂缝。
+
+    warframestat.us 解析版中 node 字段为本地化字符串，例如：
+      "Mot (Void)"、"Ani (Void)"、"Olympus (Mars)"
+    使用关键词匹配（节点名部分）来过滤，兼容中英文 API 返回。
     """
     data = _get("fissures", log_fn)
     if not isinstance(data, list):
         return []
 
+    # ── 关注节点：节点名关键词 → 显示标签 ──
+    # key 为节点名中的唯一关键词（忽略大小写），value 为显示名
+    WATCHED_NODES = {
+        "mot":       "Mot (虚空)",
+        "ani":       "Ani (虚空)",
+        "olympus":   "Olympus (火星)",
+        "stephano":  "Stephano (天王星)",
+        "kappa":     "Kappa (冥神星)",
+    }
+
     fissures = []
     cur = now_ms()
     for m in data:
-        # 只要钢铁路径（isHard=true）
         if not m.get("isHard", False):
             continue
         if not m.get("active", True):
+            continue
+
+        node_raw = m.get("node", "")
+        node_lower = node_raw.lower()
+
+        # 只保留关注节点
+        matched_label = None
+        for keyword, label in WATCHED_NODES.items():
+            if keyword in node_lower:
+                matched_label = label
+                break
+        if matched_label is None:
             continue
 
         exp_ms = _parse_iso_ms(m.get("expiry", ""))
         if exp_ms and cur > exp_ms:
             continue
 
-        node = m.get("node", "")
         fissures.append({
-            "node_label": node,
+            "node_label": matched_label,
             "tier":       m.get("tier", m.get("tierNum", "")),
             "mtype":      m.get("missionType", ""),
             "remain":     m.get("eta") or remaining(exp_ms),
